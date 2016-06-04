@@ -120,7 +120,7 @@ pub fn to_manifest(contents: &[u8],
         human(e.to_string())
     }));
 
-    let pair = try!(manifest.to_manifest(source_id, &layout, config));
+    let pair = try!(manifest.to_manifest(source_id, &layout, None, config));
     let (mut manifest, paths) = pair;
     match d.toml {
         Some(ref toml) => add_unused_keys(&mut manifest, toml, "".to_string()),
@@ -189,6 +189,7 @@ pub enum TomlDependency {
     Detailed(DetailedTomlDependency)
 }
 
+const MAGIC_STDLIB_DEP_STR: &'static str = "stdlib";
 
 #[derive(RustcDecodable, Clone, Default)]
 pub struct DetailedTomlDependency {
@@ -251,6 +252,7 @@ pub struct TomlProject {
     exclude: Option<Vec<String>>,
     include: Option<Vec<String>>,
     publish: Option<bool>,
+    implicit_dependencies: Option<bool>,
 
     // package metadata
     description: Option<String>,
@@ -291,6 +293,7 @@ struct Context<'a, 'b> {
     warnings: &'a mut Vec<String>,
     platform: Option<Platform>,
     layout: &'a Layout,
+    stdlib_repo: Option<SourceId>,
 }
 
 // These functions produce the equivalent of specific manifest entries. One
@@ -366,7 +369,7 @@ fn inferred_bench_targets(layout: &Layout) -> Vec<TomlTarget> {
 
 impl TomlManifest {
     pub fn to_manifest(&self, source_id: &SourceId, layout: &Layout,
-                       config: &Config)
+                       stdlib_repo: Option<SourceId>, config: &Config)
         -> CargoResult<(Manifest, Vec<PathBuf>)> {
         let mut nested_paths = vec![];
         let mut warnings = vec![];
@@ -505,6 +508,39 @@ impl TomlManifest {
         let mut replace = Vec::new();
 
         {
+            let resolved_implicit_deps = {
+                let mut contains_explicit_deps = None;
+                for (ref name, dep) in self.dependencies.iter()
+                    .chain(self.dev_dependencies.iter())
+                    .chain(self.build_dependencies.iter())
+                    .flat_map(|x| x)
+                {
+                    if let Some(MAGIC_STDLIB_DEP_STR) = dep.get_version() {
+                        // TODO(@Ericson2314): no need for clone w/ non-lexical lifetime
+                        contains_explicit_deps = Some(name.clone());
+                        break;
+                    }
+                }
+
+                // Based on "implicit_dependencies" flag and actual usage of
+                // explicit stdlib dependencies
+                match (contains_explicit_deps,
+                       project.implicit_dependencies)
+                {
+                    (Some(name), Some(true)) => bail!(
+                        "cannot use explicit stdlib deps when implicit deps \
+                         were explicitly enabled. \
+                         (At least {} is an explict stdlib dep.)", name),
+                    // With explicit deps, and flag not "no", resolve "yes"
+                    (Some(_), _)  => false,
+                    // With no explcit deps and no flag, resolve "yes" for
+                    // backwards-compat
+                    (None, None) => true,
+                    // With no explcit deps and the flag, obey the flag
+                    (None, Some(x)) => x,
+                }
+            };
+
             let mut cx = Context {
                 source_id: source_id,
                 nested_paths: &mut nested_paths,
@@ -512,6 +548,18 @@ impl TomlManifest {
                 warnings: &mut warnings,
                 platform: None,
                 layout: &layout,
+                stdlib_repo: stdlib_repo,
+            };
+
+            // "std" and "core" are the only stablized stdlib crates at this time
+            let mut implicit_map = HashMap::new();
+            if resolved_implicit_deps {
+                implicit_map.insert(
+                    "std".to_string(),
+                    TomlDependency::Simple(MAGIC_STDLIB_DEP_STR.to_string()));
+                implicit_map.insert(
+                    "core".to_string(),
+                    TomlDependency::Simple(MAGIC_STDLIB_DEP_STR.to_string()));
             };
 
             let mut process_deps = |
@@ -519,7 +567,14 @@ impl TomlManifest {
                 new_deps: Option<&HashMap<String, TomlDependency>>,
                 kind
             | -> CargoResult<()> {
-                for (n, v) in new_deps.into_iter().flat_map(|x| x) {
+                let iter0 = new_deps.into_iter().flat_map(|x| x);
+                let iter1 = iter0.chain(implicit_map.iter());
+                let prune = ctx.stdlib_repo.is_none();
+                let iter2 = iter1.filter(|dep| match dep.1.get_version() {
+                    Some(MAGIC_STDLIB_DEP_STR) if prune => false,
+                    _   => true,
+                });
+                for (n, v) in iter2 {
                     deps.push(try!(v.to_dependency(n, ctx, kind)));
                 }
                 Ok(())
@@ -637,6 +692,15 @@ fn unique_names_in_targets(targets: &[TomlTarget]) -> Result<(), String> {
 }
 
 impl TomlDependency {
+    fn get_version(&self) -> Option<&str> {
+        match *self {
+            TomlDependency::Simple(ref version) => Some(&version[..]),
+            TomlDependency::Detailed(DetailedTomlDependency {
+                ref version, ..
+            }) => version.as_ref().map(|v| &v[..]),
+        }
+    }
+
     fn to_dependency(&self,
                      name: &str,
                      cx: &mut Context,
@@ -660,8 +724,20 @@ impl TomlDependency {
         }
 
         // TODO(@Ericson2314): Warn if both git and path is specified?
-        let new_source_id = match (details.git.as_ref(), details.path.as_ref()) {
-            (Some(git), _) => {
+        let (version, new_source_id) = match (details.version.as_ref().map(|v| &v[..]),
+                                              details.git.as_ref(),
+                                              details.path.as_ref()) {
+            (Some(MAGIC_STDLIB_DEP_STR), None, None) => {
+                // Empty version to be compatable with whatever the rust repo
+                // throws at us
+                let sid = cx.stdlib_repo.as_ref()
+                    .expect("If no stdlib repo was given, need to filter stdlib \
+                             deps first")
+                    .clone();
+                (None, sid)
+            },
+            // In remaining cases version is just passed through
+            (version, Some(git), _) => {
                 // TODO(@Ericson2314): Warn if more than one of {rev, branch, tag}
                 // is specified?
                 let reference = details.branch.clone().map(GitReference::Branch)
@@ -669,9 +745,9 @@ impl TomlDependency {
                     .or_else(|| details.rev.clone().map(GitReference::Rev))
                     .unwrap_or_else(|| GitReference::Branch("master".to_string()));
                 let loc = try!(git.to_url().map_err(human));
-                SourceId::for_git(&loc, reference)
+                (version, SourceId::for_git(&loc, reference))
             },
-            (None, Some(path)) => {
+            (version, None, Some(path)) => {
                 cx.nested_paths.push(PathBuf::from(path));
                 // If the source id for the package we're parsing is a path
                 // source, then we normalize the path here to get rid of
@@ -681,18 +757,18 @@ impl TomlDependency {
                 // that we're depending on to ensure that builds of this package
                 // always end up hashing to the same value no matter where it's
                 // built from.
-                if cx.source_id.is_path() {
+                let sid = if cx.source_id.is_path() {
                     let path = cx.layout.root.join(path);
                     let path = util::normalize_path(&path);
                     try!(SourceId::for_path(&path))
                 } else {
                     cx.source_id.clone()
-                }
+                };
+                (version, sid)
             },
-            (None, None) => try!(SourceId::for_central(cx.config)),
+            (version, None, None) => (version, try!(SourceId::for_central(cx.config))),
         };
 
-        let version = details.version.as_ref().map(|v| &v[..]);
         let mut dep = try!(DependencyInner::parse(name, version, &new_source_id));
         dep = dep.set_features(details.features.unwrap_or(Vec::new()))
                  .set_default_features(details.default_features.unwrap_or(true))

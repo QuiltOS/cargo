@@ -479,3 +479,111 @@ warning: dependency (foo) specified without providing a local path, Git reposito
 to use. This will be considered an error in future versions
 "));
 }
+
+#[test]
+fn good_implicit_deps_enabled_with_flag() {
+    let foo = project("foo")
+    .file("Cargo.toml", r#"
+        [package]
+        name = "foo"
+        version = "0.0.0"
+        authors = []
+        implicit-dependencies = true
+    "#)
+    .file("src/lib.rs", "")
+    .file(".cargo/config", r#"
+        [build]
+        jobs = 4
+    "#);
+    assert_that(foo.cargo_process("build").arg("-v"),
+                execs().with_status(0));
+}
+
+#[test]
+fn good_explicit_stdlib_deps_without_flag() {
+    let foo = project("foo")
+    .file("Cargo.toml", r#"
+        [package]
+        name = "foo"
+        version = "0.0.0"
+        authors = []
+
+        [dependencies]
+        core = "stdlib"
+        alloc = "stdlib"
+    "#)
+    .file("src/lib.rs", "")
+    .file(".cargo/config", r#"
+        [build]
+        jobs = 4
+    "#);
+    assert_that(foo.cargo_process("build").arg("-v"),
+                execs().with_status(0));
+}
+
+#[test]
+fn good_explicit_stdlib_deps_with_flag() {
+    let foo = project("foo")
+    .file("Cargo.toml", r#"
+        [package]
+        name = "foo"
+        version = "0.0.0"
+        authors = []
+        implicit-dependencies = false
+
+        [dependencies]
+        core = "stdlib"
+        alloc = "stdlib"
+    "#)
+    .file("src/lib.rs", "")
+    .file(".cargo/config", r#"
+        [build]
+        jobs = 4
+    "#);
+    assert_that(foo.cargo_process("build").arg("-v"),
+                execs().with_status(0));
+}
+
+#[test]
+fn good_no_stdlib_deps_at_all() {
+    let foo = project("foo")
+    .file("Cargo.toml", r#"
+        [package]
+        name = "foo"
+        version = "0.0.0"
+        authors = []
+        implicit-dependencies = false
+    "#)
+    .file("src/lib.rs", "")
+    .file(".cargo/config", r#"
+        [build]
+        jobs = 4
+    "#);
+    assert_that(foo.cargo_process("build").arg("-v"),
+                execs().with_status(0));
+}
+
+
+#[test]
+fn bad_mixed_expicit_and_implicit_stdlib_deps() {
+    let foo = project("foo")
+    .file("Cargo.toml", r#"
+        [package]
+        name = "foo"
+        version = "0.0.0"
+        authors = []
+        implicit-dependencies = true
+
+        [dependencies]
+        foo = "stdlib"
+    "#)
+    .file("src/lib.rs", "");
+    assert_that(foo.cargo_process("build").arg("-v"),
+                execs().with_status(101).with_stderr("\
+[ERROR] failed to parse manifest at `[..]`
+
+Caused by:
+  cannot use explicit stdlib deps when implicit deps were explicitly enabled. \
+(At least foo is an explict stdlib dep.)
+"));
+}
