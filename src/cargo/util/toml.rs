@@ -120,7 +120,34 @@ pub fn to_manifest(contents: &[u8],
         human(e.to_string())
     }));
 
-    let pair = try!(manifest.to_manifest(source_id, &layout, None, config));
+    let opt_stdlib_reference = if
+        try!(config.get_bool("build-stdlib")).map(|v| v.val).unwrap_or(false)
+    {
+        match config.rustc_info().version_get("commit-hash") {
+            Some("unknown") | None => None,
+            Some(hash) => Some(GitReference::Rev(hash.to_string())),
+        }.or_else(|| match config.rustc_info().version_get("release") {
+            Some("unknown") | None => None,
+            Some(release) => Some(GitReference::Tag(release.to_string())),
+        })
+    } else {
+        None
+    };
+
+    let opt_stdlib_repo = match opt_stdlib_reference {
+        None => None,
+        Some(reference) => {
+            let config = try!(config.get_string("stdlib-repo"));
+            let url = config.as_ref().map(|s| &s.val[..])
+                .unwrap_or("http://github.com/rust-lang/rust.git");
+            let loc = try!(url.to_url().map_err(human));
+            Some(SourceId::for_git(&loc, reference))
+        },
+    };
+
+    let pair = try!(manifest.to_manifest(source_id, &layout,
+                                         opt_stdlib_repo,
+                                         config));
     let (mut manifest, paths) = pair;
     match d.toml {
         Some(ref toml) => add_unused_keys(&mut manifest, toml, "".to_string()),

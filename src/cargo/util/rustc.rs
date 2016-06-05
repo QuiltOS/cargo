@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use regex::Regex;
+
 use util::{self, CargoResult, internal, ChainError};
 
 pub struct Rustc {
@@ -28,16 +30,17 @@ impl Rustc {
         ret.verbose_version = try!(String::from_utf8(output.stdout).map_err(|_| {
             internal("rustc -v didn't return utf8 output")
         }));
-        ret.host = {
-            let triple = ret.verbose_version.lines().filter(|l| {
-                l.starts_with("host: ")
-            }).map(|l| &l[6..]).next();
-            let triple = try!(triple.chain_error(|| {
-                internal("rustc -v didn't have a line for `host:`")
-            }));
-            triple.to_string()
-        };
+        ret.host = try!({
+            version_get(&*ret.verbose_version, "host")
+                .chain_error(|| {
+                    internal("rustc -v didn't have a line for `host:`")
+                })
+        }).to_string();
         Ok(ret)
+    }
+
+    pub fn version_get<'a>(&'a self, key: &str) -> Option<&'a str> {
+        version_get(&self.verbose_version, key)
     }
 
     pub fn blank() -> Rustc {
@@ -47,4 +50,14 @@ impl Rustc {
             cap_lints: false,
         }
     }
+}
+
+fn version_get<'a>(verbose_version: &'a str, key: &str) -> Option<&'a str> {
+    let regex = Regex::new(&*format!(r"^{}: (.*)$", key)).unwrap();
+
+    verbose_version
+        .lines()
+        .filter_map(|l| regex.captures(l))
+        .next()
+        .and_then(|caps| caps.at(1))
 }
