@@ -602,11 +602,7 @@ impl TomlManifest {
             for (spec, replacement) in self.replace.iter().flat_map(|x| x) {
                 let spec = try!(PackageIdSpec::parse(spec));
 
-                let version_specified = match *replacement {
-                    TomlDependency::Detailed(ref d) => d.version.is_some(),
-                    TomlDependency::Simple(..) => true,
-                };
-                if version_specified {
+                if replacement.get_version().is_some() {
                     bail!("replacements cannot specify a version \
                            requirement, but found one for `{}`", spec);
                 }
