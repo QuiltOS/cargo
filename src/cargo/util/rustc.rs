@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use util::{self, CargoResult, internal, ChainError, ProcessBuilder};
+use regex::Regex;
+
+use util::{self, CargoResult, internal, ProcessBuilder};
 
 pub struct Rustc {
     pub path: PathBuf,
@@ -23,24 +25,17 @@ impl Rustc {
         let mut first = cmd.clone();
         first.arg("--cap-lints").arg("allow");
 
-        let (cap_lints, output) = match first.exec_with_output() {
-            Ok(output) => (true, output),
-            Err(..) => (false, try!(cmd.exec_with_output())),
-        };
+        let (cap_lints, output) =
+            try!(first.exec_with_output().map(|output| (true, output))
+            .or_else(|_| cmd.exec_with_output().map(|output| (false, output))));
 
         let verbose_version = try!(String::from_utf8(output.stdout).map_err(|_| {
             internal("rustc -v didn't return utf8 output")
         }));
 
-        let host = {
-            let triple = verbose_version.lines().find(|l| {
-                l.starts_with("host: ")
-            }).map(|l| &l[6..]);
-            let triple = try!(triple.chain_error(|| {
-                internal("rustc -v didn't have a line for `host:`")
-            }));
-            triple.to_string()
-        };
+        let host = try!(version_get(&verbose_version[..], "host").ok_or_else(|| {
+            internal("rustc -v didn't have a line for `host:`")
+        })).to_string();
 
         Ok(Rustc {
             path: path,
@@ -50,7 +45,21 @@ impl Rustc {
         })
     }
 
+    pub fn version_get<'a>(&'a self, key: &str) -> Option<&'a str> {
+        version_get(&self.verbose_version, key)
+    }
+
     pub fn process(&self) -> ProcessBuilder {
         util::process(&self.path)
     }
+}
+
+fn version_get<'a>(verbose_version: &'a str, key: &str) -> Option<&'a str> {
+    let regex = Regex::new(&*format!(r"^{}: (.*)$", key)).unwrap();
+
+    verbose_version
+        .lines()
+        .filter_map(|l| regex.captures(l))
+        .next()
+        .and_then(|caps| caps.at(1))
 }
