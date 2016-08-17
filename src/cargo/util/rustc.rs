@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
 use regex::Regex;
+use semver::Version;
 
 use util::{self, CargoResult, internal, ProcessBuilder};
 
 pub struct Rustc {
     pub path: PathBuf,
     pub verbose_version: String,
+    pub compiler_version: Version,
+    pub rust_version: Version,
     pub host: String,
     /// Backwards compatibility: does this compiler support `--cap-lints` flag?
     pub cap_lints: bool,
@@ -33,20 +36,32 @@ impl Rustc {
             internal("rustc -v didn't return utf8 output")
         }));
 
-        let host = try!(version_get(&verbose_version[..], "host").ok_or_else(|| {
+        let host = try!(version_get(&verbose_version[..], "host").map_err(|()| {
             internal("rustc -v didn't have a line for `host:`")
         })).to_string();
+
+        let compiler_version = try!(Version::parse(try!(
+            version_get(&verbose_version[..], "release").map_err(|()| {
+                internal("rustc -v didn't have a line for `release:`")
+            }))));
+
+        let rust_version = match version_get(&verbose_version[..], "rust-version") {
+            Ok(ver_string) => try!(Version::parse(ver_string)),
+            Err(()) => compiler_version.clone(),
+        };
 
         Ok(Rustc {
             path: path,
             verbose_version: verbose_version,
+            compiler_version: compiler_version,
+            rust_version: rust_version,
             host: host,
             cap_lints: cap_lints,
         })
     }
 
     pub fn version_get<'a>(&'a self, key: &str) -> Option<&'a str> {
-        version_get(&self.verbose_version, key)
+        version_get(&self.verbose_version, key).ok()
     }
 
     pub fn process(&self) -> ProcessBuilder {
@@ -54,7 +69,7 @@ impl Rustc {
     }
 }
 
-fn version_get<'a>(verbose_version: &'a str, key: &str) -> Option<&'a str> {
+fn version_get<'a>(verbose_version: &'a str, key: &str) -> Result<&'a str, ()> {
     let regex = Regex::new(&*format!(r"^{}: (.*)$", key)).unwrap();
 
     verbose_version
@@ -62,4 +77,5 @@ fn version_get<'a>(verbose_version: &'a str, key: &str) -> Option<&'a str> {
         .filter_map(|l| regex.captures(l))
         .next()
         .and_then(|caps| caps.at(1))
+        .ok_or(())
 }

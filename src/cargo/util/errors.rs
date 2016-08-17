@@ -328,6 +328,7 @@ macro_rules! from_error {
 
 from_error! {
     semver::ReqParseError,
+    semver::SemVerError,
     io::Error,
     ProcessError,
     git2::Error,
@@ -355,6 +356,7 @@ impl<E: CargoError> From<Human<E>> for Box<CargoError> {
 }
 
 impl CargoError for semver::ReqParseError {}
+impl CargoError for semver::SemVerError {}
 impl CargoError for io::Error {}
 impl CargoError for git2::Error {}
 impl CargoError for json::DecoderError {}
